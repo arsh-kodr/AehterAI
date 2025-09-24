@@ -10,17 +10,25 @@ const chatSchema = new mongoose.Schema(
     title: {
       type: String,
       required: true,
+      trim: true,
     },
-    lastActivity : {
-        type : Date,
-        default : Date.now
-    }
+    lastActivity: {
+      type: Date,
+      default: Date.now,
+      index: true, 
+    },
   },
   {
     timestamps: true,
   }
 );
 
-const chatModel = mongoose.model("chat" , chatSchema);
+// Optional: auto-update lastActivity when updated
+chatSchema.pre("save", function (next) {
+  this.lastActivity = Date.now();
+  next();
+});
 
-module.exports = chatModel;
+const Chat = mongoose.model("chat", chatSchema);
+
+module.exports = Chat;

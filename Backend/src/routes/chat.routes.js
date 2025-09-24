@@ -1,10 +1,16 @@
-const express = require("express");
-const {authUser} = require("../middlewares/auth.middleware");
-const {createChat} = require("../controllers/chat.controller");
+const express = require('express');
+const { authUser } = require("../middlewares/auth.middleware"); // Fixed import
+const chatController = require("../controllers/chat.controller");
 
 const router = express.Router();
 
+/* POST /api/chat/ */
+router.post('/', authUser, chatController.createChat);
 
- router.post("/" , authUser, createChat );
+/* GET /api/chat/ */
+router.get('/', authUser, chatController.getChats);
 
-module.exports = router; 
+/* GET /api/chat/messages/:id */
+router.get('/messages/:id', authUser, chatController.getMessages);
+
+module.exports = router;

@@ -1,133 +1,150 @@
 const { Server } = require("socket.io");
-const cookie = require("cookie");
+const cookie = require("cookie")
 const jwt = require("jsonwebtoken");
 const userModel = require("../models/user.model");
-const { generateResponse, generateVectors } = require("../service/ai.service");
+const aiService = require("../service/ai.service")
 const messageModel = require("../models/message.model");
-const { createMemory, querryMemory } = require("../service/vector.service");
+const { createMemory, querryMemory } = require("../service/vector.service")
 
 function initSocketServer(httpServer) {
-  const io = new Server(httpServer);
+    const io = new Server(httpServer, {
+        cors: {
+            origin: "http://localhost:5173",
+            credentials: true
+        }
+    })
 
-  io.use(async (socket, next) => {
-    const cookies = cookie.parse(socket.handshake.headers?.cookie || "");
+    io.use(async (socket, next) => {
+        try {
+            const cookies = cookie.parse(socket.handshake.headers?.cookie || "");
+            
+            if (!cookies.token) {
+                return next(new Error("Authentication error: No token provided"));
+            }
 
-    if (!cookies.token) {
-      return next(new Error("Authentication Error :  No token provided"));
-    }
+            const decoded = jwt.verify(cookies.token, process.env.JWT_SECRET);
+            const user = await userModel.findById(decoded.id);
 
-    try {
-      const decoded = jwt.verify(cookies.token, process.env.JWT_SECRET);
+            if (!user) {
+                return next(new Error("Authentication error: User not found"));
+            }
 
-      const user = await userModel.findById(decoded.id);
+            socket.user = user;
+            next();
 
-      socket.user = user;
+        } catch (err) {
+            console.log("Socket auth error:", err);
+            next(new Error("Authentication error: Invalid token"));
+        }
+    })
 
-      next();
-    } catch (error) {
-      next(new Error("Authentication Error :  Invalid Token"));
-      return error;
-    }
-  });
+    io.on("connection", (socket) => {
+        console.log("User connected:", socket.user.email);
 
-  io.on("connection", (socket) => {
-    console.log("New Socket Connection : ", socket.id);
+        socket.on("ai-message", async (messagePayload) => {
+            try {
+                console.log("Received AI message:", messagePayload);
+                
+                // 1. Save user message and generate vectors
+                const [message, vectors] = await Promise.all([
+                    messageModel.create({
+                        chat: messagePayload.chat,
+                        user: socket.user._id,
+                        content: messagePayload.content,
+                        role: "user"
+                    }),
+                    aiService.generateVectors(messagePayload.content),
+                ])
 
-    socket.on("ai-message", async (messagePayload) => {
-      const [message, vectors] = await Promise.all([
-        messageModel.create({
-          chat: messagePayload.chat,
-          user: socket.user._id,
-          content: messagePayload.content,
-          role: "user",
-        }),
+                // 2. Create memory for user message
+                await createMemory({
+                    vectors,
+                    messageId: message._id.toString(),
+                    metadata: {
+                        chat: messagePayload.chat,
+                        user: socket.user._id.toString(),
+                        text: messagePayload.content
+                    }
+                })
 
-        generateVectors(messagePayload.content),
-      ]);
+                // 3. Query memory and get chat history
+                const [memory, chatHistory] = await Promise.all([
+                    querryMemory({
+                        queryVector: vectors,
+                        limit: 3,
+                        metadata: {
+                            user: socket.user._id.toString()
+                        }
+                    }),
+                    messageModel.find({
+                        chat: messagePayload.chat
+                    }).sort({ createdAt: -1 }).limit(20).lean().then(messages => messages.reverse())
+                ])
 
-      await createMemory({
-        vectors,
-        messageId: message._id,
-        metadata: {
-          user: socket.user._id,
-          chat: messagePayload.chat,
-          text: messagePayload.content,
-        },
-      });
+                // 4. Prepare context for AI
+                const stm = chatHistory.map(item => ({
+                    role: item.role,
+                    parts: [{ text: item.content }]
+                }))
 
-      const [memory, chatHistory] = await Promise.all([
-        querryMemory({
-          queryVector: vectors,
-          limit: 3,
-          metadata: {
-            user: socket.user._id,
-          },
-        }),
+                const ltm = [{
+                    role: "user",
+                    parts: [{
+                        text: `These are some previous messages from the chat, use them to generate a response:
+                        ${memory.map(item => item.metadata?.text || '').join("\n")}`
+                    }]
+                }]
 
-        messageModel
-          .find({
-            chat: messagePayload.chat,
-          })
-          .sort({ createdAt: 1 })
-          .limit(20)
-          .lean()
-          .then((messages) =>
-            messages.map(({ role, content }) => ({ role, content }))
-          ),
-      ]);
+                // 5. Generate AI response
+                const response = await aiService.generateResponse([...ltm, ...stm])
+                console.log("AI response generated:", response.substring(0, 100) + "...");
 
-      const stm = chatHistory.map((item) => {
-        return {
-          role: item.role,
-          parts: [{ text: item.content }],
-        };
-      });
+                // 6. Send response to client immediately
+                socket.emit('ai-response', {
+                    content: response,
+                    chat: messagePayload.chat
+                })
 
-      const ltm = [
-        {
-          role: "user",
-          parts: [
-            {
-              text: `
-            these are some previous messsages from the chat , use them to generate a better response
-            ${memory.map((item) => item.metadata.text).join("\n")}
-            `,
-            },
-          ],
-        },
-      ];
+                // 7. Save AI response to database (wrap in try-catch to not affect user experience)
+                try {
+                    const [responseMessage, responseVectors] = await Promise.all([
+                        messageModel.create({
+                            chat: messagePayload.chat,
+                            user: socket.user._id,
+                            content: response,
+                            role: "model"
+                        }),
+                        aiService.generateVectors(response)
+                    ])
 
-      console.log(ltm[0]);
-      console.log(stm);
+                    await createMemory({
+                        vectors: responseVectors,
+                        messageId: responseMessage._id.toString(),
+                        metadata: {
+                            chat: messagePayload.chat,
+                            user: socket.user._id.toString(),
+                            text: response
+                        }
+                    })
+                    
+                    console.log("AI response saved to database");
+                } catch (saveError) {
+                    console.error("Error saving AI response to database:", saveError);
+                    // Don't send error to client since they already got the response
+                }
 
-      const response = await generateResponse([...ltm, ...stm]);
+            } catch (error) {
+                console.error("Error processing AI message:", error);
+                socket.emit('ai-response-error', {
+                    error: "Failed to process message"
+                });
+            }
+        })
 
-      socket.emit("ai-response", {
-        content: response,
-        chat: messagePayload.chat,
-      });
-
-      const [responseMessage, responseVectors] = await Promise.all([
-        messageModel.create({
-          chat: messagePayload.chat,
-          user: socket.user._id,
-          content: response,
-          role: "model",
-        }),
-        generateVectors(response),
-      ]);
-
-      await createMemory({
-        vectors: responseVectors,
-        messageId: responseMessage._id,
-        metadata: {
-          user: socket.user._id,
-          chat: messagePayload.chat,
-          text: response,
-        },
-      });
-    });
-  });
+        socket.on("disconnect", () => {
+            console.log("User disconnected:", socket.user.email);
+        });
+    })
 }
 
 module.exports = initSocketServer;

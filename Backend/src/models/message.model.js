@@ -1,28 +1,34 @@
 const mongoose = require("mongoose");
 
-const messageSchema = new mongoose.Schema({
-    user : {
-        type : mongoose.Schema.Types.ObjectId,
-        ref : "User",
-
+const messageSchema = new mongoose.Schema(
+  {
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "user", 
     },
-    chat : {
-        type : mongoose.Schema.Types.ObjectId,
-        ref : "Chat",
+    chat: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Chat",
+      required: true,
+      index: true, 
     },
-    content : {
-        type : String,
-        required : true
-    }, 
-    role : {
-        type : String,
-        enum : ["user" , "model" , "system"],
-        default : "user"
-    }
-}, { 
-    timestamps : true 
-});         
+    content: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    role: {
+      type: String,
+      enum: ["user", "assistant", "system"], 
+      default: "user",
+    },
+  },
+  { timestamps: true }
+);
 
-const messageModel = mongoose.model("message" , messageSchema);
+// Index for fetching chat history fast
+messageSchema.index({ chat: 1, createdAt: 1 });
 
-module.exports = messageModel;
+const Message = mongoose.model("message", messageSchema);
+
+module.exports = Message;

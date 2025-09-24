@@ -6,13 +6,23 @@ const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
 
 const cohortChatGptIndex = pc.Index('cohort-chat-gpt');
 
-async function createMemory({vectors ,metadata, messageId}) {
-    
-    await cohortChatGptIndex.upsert([{
-        id: messageId,
-        values : vectors,
-        metadata
-    }])
+async function createMemory({vectors, metadata, messageId}) {
+    try {
+        console.log("Creating memory for message:", messageId);
+        console.log("Vectors length:", vectors.length);
+        console.log("Metadata:", metadata);
+        
+        await cohortChatGptIndex.upsert([{
+            id: messageId.toString(), // Ensure string
+            values: vectors,
+            metadata
+        }]);
+        
+        console.log("Memory created successfully");
+    } catch (error) {
+        console.error("Error creating memory:", error);
+        throw error;
+    }
 }
 
 async function querryMemory({queryVector, limit = 5 , metadata}) {
